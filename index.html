@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Automated Emergency Assist</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <style>
+    :root {
+      --bg:#f2f9ff;
+      --card:#fff;
+      --accent:#b71c1c;
+      --radius:12px;
+      --shadow:0 20px 60px rgba(0,0,0,0.08);
+      font-family: system-ui,-apple-system,BlinkMacSystemFont,sans-serif;
+    }
+    *{box-sizing:border-box;}
+    body {
+      margin:0;
+      background: var(--bg);
+      color:#1f2d3a;
+      min-height:100vh;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      padding:1rem;
+    }
+    .card {
+      width:100%;
+      max-width:500px;
+      background: var(--card);
+      border-radius: var(--radius);
+      padding:1.5rem;
+      box-shadow: var(--shadow);
+      display:flex;
+      flex-direction:column;
+      gap:1rem;
+    }
+    h1 {
+      margin:0;
+      font-size:1.8rem;
+      text-align:center;
+    }
+    .status {
+      padding:0.75rem 1rem;
+      background:#e3f2fd;
+      border-radius:8px;
+      font-size:0.95rem;
+      display:flex;
+      gap:0.5rem;
+      align-items:center;
+    }
+    .big-button {
+      background: var(--accent);
+      color:#fff;
+      border:none;
+      padding:1.1rem;
+      font-size:1.3rem;
+      font-weight:700;
+      border-radius:12px;
+      cursor:pointer;
+      width:100%;
+      display:flex;
+      justify-content:center;
+      align-items:center;
+      gap:0.5rem;
+      transition:transform .15s;
+    }
+    .big-button:active { transform:scale(.96); }
+    .log {
+      background:#f8f9fa;
+      padding:0.85rem;
+      border-radius:8px;
+      font-size:0.75rem;
+      max-height:180px;
+      overflow:auto;
+    }
+    .badge {
+      padding:4px 10px;
+      border-radius:999px;
+      font-size:0.65rem;
+      background:#ffe082;
+      color:#5d4037;
+      margin-left:auto;
+    }
+    .small {
+      font-size:0.75rem;
+    }
+  </style>
+</head>
+<body>
+  <div class="card" aria-label="Automated emergency assistance">
+    <h1>Emergency Assist</h1>
+    <div class="status" id="status">
+      Status: Initializing...
+      <div class="badge" id="voiceBadge">Voice: idle</div>
+      <div class="badge" id="soundBadge">Sound: normal</div>
+    </div>
+    <button class="big-button" id="emergencyBtn" aria-label="Manual emergency override">
+      🚨 SEND EMERGENCY ALERT NOW
+    </button>
+    <div class="log" id="log">
+      <div><strong>Activity Log:</strong></div>
+    </div>
+    <div class="small">
+      Note: Microphone & location require HTTPS or localhost. Permissions will be requested automatically.
+    </div>
+  </div>
+
+<script>
+  // Configuration
+  const HOSPITAL_NUMBER = "+1234567890"; // replace with actual destination
+  const VOICE_KEYWORDS = ["help", "emergency", "save me", "pain", "can't breathe", "dizzy", "fall"];
+  const AUTO_LOCATION_TIMEOUT_MS = 8000;
+  const SOUND_TRIGGER_THRESHOLD = 0.3;
+
+  // Elements
+  const statusEl = document.getElementById("status");
+  const logEl = document.getElementById("log");
+  const emergencyBtn = document.getElementById("emergencyBtn");
+  const voiceBadge = document.getElementById("voiceBadge");
+  const soundBadge = document.getElementById("soundBadge");
+
+  let lastLocation = null;
+  let listening = false;
+  let recognition = null;
+  let soundAnalyzer = null;
+
+  function log(msg) {
+    const t = new Date().toLocaleTimeString();
+    const entry = document.createElement("div");
+    entry.textContent = `[${t}] ${msg}`;
+    logEl.appendChild(entry);
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  function setStatus(txt) {
+    if (statusEl.firstChild) {
+      statusEl.firstChild.textContent = 'Status: ' + txt;
+    } else {
+      statusEl.textContent = 'Status: ' + txt;
+    }
+  }
+
+  function composeSmsBody(source = "auto") {
+    let body = `Emergency detected via ${source}. Please send immediate help.`;
+    if (lastLocation) {
+      body += ` Location: https://www.google.com/maps?q=${lastLocation.latitude},${lastLocation.longitude}`;
+    } else {
+      body += " Location: unavailable.";
+    }
+    body += " -- Auto alert";
+    return encodeURIComponent(body);
+  }
+
+  async function sendEmergency(source = "auto") {
+    setStatus("Emergency triggered");
+    log(`Triggering emergency from ${source}...`);
+
+    let body = {
+      source,
+      latitude: lastLocation ? lastLocation.latitude : null,
+      longitude: lastLocation ? lastLocation.longitude : null
+    };
+
+    try {
+      const resp = await fetch("http://localhost:5000/api/emergency", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body)
+      });
+
+      const data = await resp.json();
+      if (data.success) {
+        log("✅ Emergency alert sent to hospital automatically!");
+        setStatus("Alert delivered.");
+      } else {
+        throw new Error(data.error);
+      }
+    } catch (e) {
+      log(`❌ Failed to send alert: ${e.message}`);
+      setStatus("Delivery failed.");
+    }
+  }
+
+  function attemptLocation() {
+    return new Promise((resolve) => {
+      if (!navigator.geolocation) {
+        log("Geolocation unsupported by browser.");
+        resolve(null);
+        return;
+      }
+      let resolved = false;
+      const timer = setTimeout(async () => {
+        if (!resolved) {
+          log("Geolocation timed out, falling back to IP-based location.");
+          const ipLoc = await fetchIpLocation();
+          resolved = true;
+          resolve(ipLoc);
+        }
+      }, AUTO_LOCATION_TIMEOUT_MS);
+
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          if (resolved) return;
+          clearTimeout(timer);
+          const { latitude, longitude } = pos.coords;
+          lastLocation = { latitude, longitude };
+          setStatus("Precise location acquired");
+          log(`Geolocation success: ${latitude.toFixed(5)}, ${longitude.toFixed(5)}`);
+          resolved = true;
+          resolve(lastLocation);
+        },
+        async (err) => {
+          if (resolved) return;
+          clearTimeout(timer);
+          log(`Geolocation error: ${err.message}. Trying IP fallback.`);
+          const ipLoc = await fetchIpLocation();
+          resolved = true;
+          resolve(ipLoc);
+        },
+        { enableHighAccuracy: true, maximumAge: 10000 }
+      );
+    });
+  }
+
+  async function fetchIpLocation() {
+    try {
+      setStatus("Fetching approximate IP location");
+      const resp = await fetch("https://ipapi.co/json/");
+      if (!resp.ok) throw new Error("IP API failed");
+      const data = await resp.json();
+      if (data && data.latitude && data.longitude) {
+        lastLocation = { latitude: data.latitude, longitude: data.longitude };
+        setStatus("Approximate location acquired");
+        log(`IP-based location: ${data.latitude.toFixed(4)}, ${data.longitude.toFixed(4)} (city: ${data.city || 'unknown'})`);
+        return lastLocation;
+      }
+    } catch (e) {
+      log("IP location fetch failed: " + e.message);
+    }
+    setStatus("Location unavailable");
+    return null;
+  }
+
+  function initVoiceRecognition() {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      log("Voice recognition not supported.");
+      voiceBadge.textContent = "unsupported";
+      return;
+    }
+    recognition = new SpeechRecognition();
+    recognition.continuous = true;
+    recognition.interimResults = false;
+    recognition.lang = "en-US";
+    recognition.maxAlternatives = 1;
+
+    recognition.onstart = () => {
+      listening = true;
+      voiceBadge.textContent = "listening";
+      setStatus("Listening for voice keyword");
+      log("Voice recognition started.");
+    };
+    recognition.onend = () => {
+      listening = false;
+      voiceBadge.textContent = "idle";
+      setStatus("Voice idle (will auto-restart)");
+      log("Voice recognition ended, restarting in 1s.");
+      setTimeout(() => recognition.start(), 1000);
+    };
+    recognition.onerror = (e) => {
+      log("Voice error: " + e.error);
+    };
+    recognition.onresult = async (event) => {
+      const transcript = event.results[event.results.length - 1][0].transcript.trim().toLowerCase();
+      log(`Voice heard: "${transcript}"`);
+      for (const kw of VOICE_KEYWORDS) {
+        if (transcript.includes(kw)) {
+          log(`Keyword "${kw}" detected in speech.`);
+          setStatus(`Keyword "${kw}" detected`);
+          voiceBadge.textContent = `heard: ${kw}`;
+          await attemptLocation();
+          sendEmergency("voice");
+          break;
+        }
+      }
+    };
+    recognition.start();
+  }
+
+  async function startSoundMonitoring() {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const AudioContext = window.AudioContext || window.webkitAudioContext;
+      const ctx = new AudioContext();
+      const src = ctx.createMediaStreamSource(stream);
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 1024;
+      src.connect(analyser);
+      const dataArr = new Uint8Array(analyser.fftSize);
+      let baseline = null;
+
+      const sampleBaseline = () => {
+        analyser.getByteTimeDomainData(dataArr);
+        let sum = 0;
+        for (let i = 0; i < dataArr.length; i++) {
+          const v = (dataArr[i] - 128) / 128;
+          sum += Math.abs(v);
+        }
+        baseline = sum / dataArr.length;
+        log("Baseline sound level computed.");
+      };
+
+      sampleBaseline();
+
+      const check = () => {
+        analyser.getByteTimeDomainData(dataArr);
+        let sum = 0;
+        for (let i = 0; i < dataArr.length; i++) {
+          const v = (dataArr[i] - 128) / 128;
+          sum += Math.abs(v);
+        }
+        const avg = sum / dataArr.length;
+        const ratio = baseline ? avg / baseline : 1;
+        if (ratio > 3) {
+          soundBadge.textContent = "panic sound";
+          setStatus("Loud sudden sound detected");
+          log("Panic-level sound spike detected.");
+          baseline = avg;
+          (async () => {
+            await attemptLocation();
+            sendEmergency("sound");
+          })();
+        } else {
+          soundBadge.textContent = "normal";
+        }
+        requestAnimationFrame(check);
+      };
+      check();
+    } catch (e) {
+      log("Sound monitoring unavailable: " + e.message);
+    }
+  }
+
+  emergencyBtn.addEventListener("click", async () => {
+    setStatus("Manual emergency button pressed");
+    await attemptLocation();
+    sendEmergency("manual");
+  });
+
+  (async () => {
+    setStatus("Initializing voice & location");
+    initVoiceRecognition();
+    startSoundMonitoring();
+    await attemptLocation();
+    setStatus("Ready (monitoring automatically)");
+    log("System ready. Waiting for triggers.");
+  })();
+</script>
+
+</body>
+</html>
